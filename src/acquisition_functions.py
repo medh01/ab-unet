@@ -3,6 +3,9 @@ from scipy.stats import entropy as ent
 from scipy.special import kl_div
 from scipy.spatial.distance import jensenshannon
 import torch
+
+import torch.nn as nn          # ← ADD THIS LINE
+
 import torch.nn.functional as F
 
 
