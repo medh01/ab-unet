@@ -9,6 +9,13 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 import numpy as np
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GLOBAL CONSTANT: the size to which every image and mask will be resized.
+# Feel free to change this to e.g. (512, 512) if your UNet expects bigger inputs.
+TARGET_SIZE = (256, 256)   # (height, width)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 ################################################################################
 # 2.1) SPLIT IMAGES INTO LABELED / UNLABELED / TEST FOLDERS
 ################################################################################
@@ -55,16 +62,13 @@ def labeled_unlabeled_test_split(
             dir_path = os.path.join(root, fn)
             os.makedirs(dir_path, exist_ok=True)
 
-    # Create the full structure:
-    # base_dir/Labeled_pool/{labeled_images, labeled_masks}
-    # base_dir/Unlabeled_pool/{unlabeled_images, unlabeled_masks}
-    # base_dir/Test/{test_images, test_masks}
+    # Create the required folder structure:
     make_subfolders(base_dir, [labeled_dir, unlabeled_dir, test_dir])
     make_subfolders(os.path.join(base_dir, labeled_dir),   ["labeled_images",   "labeled_masks"])
     make_subfolders(os.path.join(base_dir, unlabeled_dir), ["unlabeled_images", "unlabeled_masks"])
     make_subfolders(os.path.join(base_dir, test_dir),      ["test_images",      "test_masks"])
 
-    # Now, distribute each BMP image (and its PNG mask) into one of the splits:
+    # Distribute images & masks
     for i, im_name in enumerate(all_images):
         if i < n_labeled:
             split = labeled_dir
@@ -79,12 +83,12 @@ def labeled_unlabeled_test_split(
             sub_im  = "test_images"
             sub_msk = "test_masks"
 
-        # 1) Copy the image (.BMP)
+        # 1) Copy the .BMP image
         src_im = os.path.join(img_folder, im_name)
         dst_im = os.path.join(base_dir, split, sub_im, im_name)
         shutil.copy(src_im, dst_im)
 
-        # 2) Copy the corresponding mask (.png)
+        # 2) Copy the corresponding .png mask (same base name)
         base_name   = os.path.splitext(im_name)[0]       # strip ".BMP" → "XYZ"
         mask_name   = base_name + ".png"                 # "XYZ.png"
         src_msk     = os.path.join(mask_folder, mask_name)
@@ -118,13 +122,13 @@ def move_images(
     to_move = unlabeled_imgs[:num_to_move]
 
     for im in to_move:
-        # 1) Move the BMP image
+        # 1) Move the .BMP image
         src_im = os.path.join(base_dir, unlabeled_dir, "unlabeled_images", im)
         dst_im = os.path.join(base_dir, labeled_dir,   "labeled_images",   im)
         shutil.copy(src_im, dst_im)
         os.remove(src_im)
 
-        # 2) Move the corresponding PNG mask
+        # 2) Move the corresponding .png mask
         base_name = os.path.splitext(im)[0]      # "XYZ"
         mask_name = base_name + ".png"           # "XYZ.png"
         src_msk   = os.path.join(base_dir, unlabeled_dir, "unlabeled_masks", mask_name)
@@ -155,12 +159,12 @@ def move_images_with_dict(
         # 1) Move the .BMP image
         src_im = os.path.join(base_dir, unlabeled_dir, "unlabeled_images", im)
         if not os.path.exists(src_im):
-            continue  # some images may already have been moved
-        dst_im = os.path.join(base_dir, labeled_dir, "labeled_images", im)
+            continue
+        dst_im = os.path.join(base_dir, labeled_dir,   "labeled_images",   im)
         shutil.copy(src_im, dst_im)
         os.remove(src_im)
 
-        # 2) Move the .png mask
+        # 2) Move the corresponding .png mask
         base_name = os.path.splitext(im)[0]
         mask_name = base_name + ".png"
         src_msk   = os.path.join(base_dir, unlabeled_dir, "unlabeled_masks", mask_name)
@@ -177,23 +181,24 @@ def move_images_with_dict(
 
 
 ################################################################################
-# 2.3) BUILD DATA LOADERS FOR ACTIVE LEARNING
+# 2.3) BUILD DATA LOADERS FOR ACTIVE LEARNING (ALL IMAGES & MASKS FORCED TO SAME SIZE)
 ################################################################################
 class SegmentationFolder(Dataset):
     """
-    A simple folder‐based segmentation dataset.  Expects:
+    A folder‐based segmentation dataset. Expects:
       root/
         images/  (e.g. labeled_images or test_images, each image is .BMP)
         masks/   (e.g. labeled_masks or test_masks, each mask is .png)
     Each image “xyz.BMP” → mask “xyz.png”.
-    Returns (img_tensor, mask_tensor, filename).
+    We resize both to TARGET_SIZE before converting to tensors,
+    so every batch is a uniform (C, 256, 256) and (1, 256, 256).
     """
     def __init__(self, root: str, transform=None):
         super().__init__()
         self.img_folder  = os.path.join(root, "images")
         self.mask_folder = os.path.join(root, "masks")
         self.transform   = transform
-        # Only list .BMP files in images/
+        # Only list .BMP files
         self.images      = [
             f for f in os.listdir(self.img_folder)
             if os.path.isfile(os.path.join(self.img_folder, f)) and f.lower().endswith(".bmp")
@@ -210,14 +215,21 @@ class SegmentationFolder(Dataset):
         mask_name= base_name + ".png"                             # "XYZ.png"
         msk_path = os.path.join(self.mask_folder, mask_name)
 
+        # 1) Open and resize the image and mask to TARGET_SIZE
         image = Image.open(img_path).convert("RGB")
         mask  = Image.open(msk_path).convert("L")  # single‐channel
 
-        img_t = TF.to_tensor(image)                               # (3, H, W)
-        msk_t = torch.from_numpy(np.array(mask)).long()            # (H, W) ints
+        image = image.resize(TARGET_SIZE, resample=Image.BILINEAR)
+        mask  = mask.resize(TARGET_SIZE, resample=Image.NEAREST)
 
+        # 2) Convert to tensors
+        img_t = TF.to_tensor(image)                               # (3, 256, 256)
+        msk_t = torch.from_numpy(np.array(mask)).long()            # (256, 256) ints
+
+        # 3) Apply any additional transform (e.g. augmentations) if provided
         if self.transform:
             img_t, msk_t = self.transform(img_t, msk_t)
+
         return img_t, msk_t, im_name
 
 
@@ -238,6 +250,9 @@ def get_loaders_active(
       1) labeled_loader:   yields (img, mask, filename)
       2) unlabeled_loader: yields (img, filename)
       3) test_loader:      yields (img, mask, filename)
+
+    All images & masks are resized to TARGET_SIZE before tensor‐conversion,
+    so batches can be stacked without error.
     """
     class LabeledDataset(Dataset):
         def __init__(self, img_dir, mask_dir, transform=None):
@@ -264,8 +279,12 @@ def get_loaders_active(
             image = Image.open(img_path).convert("RGB")
             mask  = Image.open(msk_path).convert("L")
 
-            img_t = TF.to_tensor(image)
-            msk_t = torch.from_numpy(np.array(mask)).long()
+            # Resize both
+            image = image.resize(TARGET_SIZE, resample=Image.BILINEAR)
+            mask  = mask.resize(TARGET_SIZE, resample=Image.NEAREST)
+
+            img_t = TF.to_tensor(image)                               # (3, 256, 256)
+            msk_t = torch.from_numpy(np.array(mask)).long()            # (256, 256)
 
             if self.transform:
                 img_t, msk_t = self.transform(img_t, msk_t)
@@ -289,11 +308,16 @@ def get_loaders_active(
             im_name = self.images[idx]                              # e.g. "XYZ.BMP"
             img_path = os.path.join(self.img_folder, im_name)
             image = Image.open(img_path).convert("RGB")
-            img_t  = TF.to_tensor(image)
+
+            # Resize image:
+            image = image.resize(TARGET_SIZE, resample=Image.BILINEAR)
+
+            img_t  = TF.to_tensor(image)                              # (3, 256, 256)
             if self.transform:
                 img_t = self.transform(img_t)
-            return img_t, im_name  # no mask
+            return img_t, im_name  # no mask for unlabeled
 
+    # Build the three datasets and their DataLoaders
     labeled_ds     = LabeledDataset(labeled_img_dir, labeled_mask_dir, transform_labeled)
     unlabeled_ds   = UnlabeledDataset(unlabeled_img_dir, transform_unlabeled)
     test_ds        = LabeledDataset(test_img_dir, test_mask_dir, transform_labeled)
