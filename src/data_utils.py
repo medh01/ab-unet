@@ -1,7 +1,9 @@
+# data_utils.py
+
 import os
 import shutil
 import random
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader
 import torch
 import torchvision.transforms.functional as TF
 from PIL import Image
@@ -22,8 +24,8 @@ def labeled_unlabeled_test_split(
     """
     Given base_dir (e.g. “ab-unet/data”), where:
         base_dir/
-          Images/   ← your raw images (capital “I”)
-          masks/    ← your raw masks
+          Images/   ← raw images (extension .BMP)
+          masks/    ← raw masks (extension .png)
     Split into three subfolders:
         base_dir/Labeled_pool/{labeled_images/, labeled_masks/}
         base_dir/Unlabeled_pool/{unlabeled_images/, unlabeled_masks/}
@@ -31,11 +33,14 @@ def labeled_unlabeled_test_split(
     according to label_split_ratio and test_split_ratio.
     """
 
-    # Originally we assumed “images”, but in your project the folder is “Images” with capital I:
-    img_folder  = os.path.join(base_dir, "Images")   # <--- changed from "images"
-    mask_folder = os.path.join(base_dir, "masks")    # your masks folder stays lowercase
+    img_folder  = os.path.join(base_dir, "Images")   # raw images folder (capital “I”)
+    mask_folder = os.path.join(base_dir, "masks")    # raw masks folder (lowercase)
 
-    all_images = [f for f in os.listdir(img_folder) if os.path.isfile(os.path.join(img_folder, f))]
+    # List all .BMP files in Images/
+    all_images = [
+        f for f in os.listdir(img_folder)
+        if os.path.isfile(os.path.join(img_folder, f)) and f.lower().endswith(".bmp")
+    ]
     if shuffle:
         random.shuffle(all_images)
 
@@ -44,13 +49,13 @@ def labeled_unlabeled_test_split(
     n_labeled   = int((N - n_test) * label_split_ratio)
     n_unlabeled = N - n_test - n_labeled
 
-    # Helper to create subfolders if they don’t exist
+    # Helper: create subfolders if they don’t exist
     def make_subfolders(root, folder_names):
         for fn in folder_names:
             dir_path = os.path.join(root, fn)
             os.makedirs(dir_path, exist_ok=True)
 
-    # Create structure:
+    # Create the full structure:
     # base_dir/Labeled_pool/{labeled_images, labeled_masks}
     # base_dir/Unlabeled_pool/{unlabeled_images, unlabeled_masks}
     # base_dir/Test/{test_images, test_masks}
@@ -59,7 +64,7 @@ def labeled_unlabeled_test_split(
     make_subfolders(os.path.join(base_dir, unlabeled_dir), ["unlabeled_images", "unlabeled_masks"])
     make_subfolders(os.path.join(base_dir, test_dir),      ["test_images",      "test_masks"])
 
-    # Distribute images and masks
+    # Now, distribute each BMP image (and its PNG mask) into one of the splits:
     for i, im_name in enumerate(all_images):
         if i < n_labeled:
             split = labeled_dir
@@ -74,17 +79,17 @@ def labeled_unlabeled_test_split(
             sub_im  = "test_images"
             sub_msk = "test_masks"
 
-        # Copy the image file
+        # 1) Copy the image (.BMP)
         src_im = os.path.join(img_folder, im_name)
         dst_im = os.path.join(base_dir, split, sub_im, im_name)
         shutil.copy(src_im, dst_im)
 
-        # Copy the corresponding mask file
-        # Here we assume masks are named by replacing "IMGNAME.ext" → "IMGNAME_mask.ext"
-        # Adjust this logic if your naming is different.
-        mask_name = im_name.replace(".jpg", "_mask.png")
-        src_msk = os.path.join(mask_folder, mask_name)
-        dst_msk = os.path.join(base_dir, split, sub_msk, mask_name)
+        # 2) Copy the corresponding mask (.png)
+        base_name   = os.path.splitext(im_name)[0]       # strip ".BMP" → "XYZ"
+        mask_name   = base_name + ".png"                 # "XYZ.png"
+        src_msk     = os.path.join(mask_folder, mask_name)
+        dst_msk     = os.path.join(base_dir, split, sub_msk, mask_name)
+
         if os.path.exists(src_msk):
             shutil.copy(src_msk, dst_msk)
         else:
@@ -102,21 +107,26 @@ def move_images(
 ):
     """
     Move `num_to_move` random images (and their matching masks) from
-    base_dir/unlabeled_dir/ → base_dir/labeled_dir/
+    base_dir/unlabeled_dir/{unlabeled_images,unlabeled_masks} →
+    base_dir/labeled_dir/{labeled_images,labeled_masks}.
     """
-    unlabeled_imgs = os.listdir(os.path.join(base_dir, unlabeled_dir, "unlabeled_images"))
+    unlabeled_imgs = [
+        f for f in os.listdir(os.path.join(base_dir, unlabeled_dir, "unlabeled_images"))
+        if f.lower().endswith(".bmp")
+    ]
     random.shuffle(unlabeled_imgs)
     to_move = unlabeled_imgs[:num_to_move]
 
     for im in to_move:
-        # Move the image
+        # 1) Move the BMP image
         src_im = os.path.join(base_dir, unlabeled_dir, "unlabeled_images", im)
         dst_im = os.path.join(base_dir, labeled_dir,   "labeled_images",   im)
         shutil.copy(src_im, dst_im)
         os.remove(src_im)
 
-        # Move the mask
-        mask_name = im.replace(".jpg", "_mask.png")
+        # 2) Move the corresponding PNG mask
+        base_name = os.path.splitext(im)[0]      # "XYZ"
+        mask_name = base_name + ".png"           # "XYZ.png"
         src_msk   = os.path.join(base_dir, unlabeled_dir, "unlabeled_masks", mask_name)
         dst_msk   = os.path.join(base_dir, labeled_dir,   "labeled_masks",   mask_name)
         if os.path.exists(src_msk):
@@ -134,21 +144,25 @@ def move_images_with_dict(
     num_to_move: int = 10
 ):
     """
-    Move the top‐`num_to_move` images (in descending score order) from unlabeled → labeled,
-    based on the provided score_dict {filename:score}.
+    Move the top‐`num_to_move` images (by descending score) from
+    unlabeled → labeled.  `score_dict` is an OrderedDict {filename:score}.
     """
     moved = 0
     for im, score in score_dict.items():
         if moved >= num_to_move:
             break
+
+        # 1) Move the .BMP image
         src_im = os.path.join(base_dir, unlabeled_dir, "unlabeled_images", im)
         if not os.path.exists(src_im):
-            continue  # maybe it was already moved
-        dst_im = os.path.join(base_dir, labeled_dir,   "labeled_images",   im)
+            continue  # some images may already have been moved
+        dst_im = os.path.join(base_dir, labeled_dir, "labeled_images", im)
         shutil.copy(src_im, dst_im)
         os.remove(src_im)
 
-        mask_name = im.replace(".jpg", "_mask.png")
+        # 2) Move the .png mask
+        base_name = os.path.splitext(im)[0]
+        mask_name = base_name + ".png"
         src_msk   = os.path.join(base_dir, unlabeled_dir, "unlabeled_masks", mask_name)
         dst_msk   = os.path.join(base_dir, labeled_dir,   "labeled_masks",   mask_name)
         if os.path.exists(src_msk):
@@ -156,6 +170,7 @@ def move_images_with_dict(
             os.remove(src_msk)
         else:
             print(f"Warning: mask {src_msk} not found; skipping.")
+
         moved += 1
 
     print(f"Moved {moved} images from {unlabeled_dir} → {labeled_dir}.")
@@ -166,11 +181,11 @@ def move_images_with_dict(
 ################################################################################
 class SegmentationFolder(Dataset):
     """
-    A simple folder‐based segmentation dataset. Assumes:
+    A simple folder‐based segmentation dataset.  Expects:
       root/
-        images/  (in your case, labeled_images or test_images)
-        masks/   (labeled_masks or test_masks)
-    Each image “xyz.jpg” → mask “xyz_mask.png”.
+        images/  (e.g. labeled_images or test_images, each image is .BMP)
+        masks/   (e.g. labeled_masks or test_masks, each mask is .png)
+    Each image “xyz.BMP” → mask “xyz.png”.
     Returns (img_tensor, mask_tensor, filename).
     """
     def __init__(self, root: str, transform=None):
@@ -178,27 +193,31 @@ class SegmentationFolder(Dataset):
         self.img_folder  = os.path.join(root, "images")
         self.mask_folder = os.path.join(root, "masks")
         self.transform   = transform
-        self.images = [f for f in os.listdir(self.img_folder) if os.path.isfile(os.path.join(self.img_folder, f))]
+        # Only list .BMP files in images/
+        self.images      = [
+            f for f in os.listdir(self.img_folder)
+            if os.path.isfile(os.path.join(self.img_folder, f)) and f.lower().endswith(".bmp")
+        ]
         self.images.sort()
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
-        im_name  = self.images[idx]
+        im_name  = self.images[idx]                              # e.g. "XYZ.BMP"
         img_path = os.path.join(self.img_folder, im_name)
-        mask_name= im_name.replace(".jpg", "_mask.png")
+        base_name= os.path.splitext(im_name)[0]                   # "XYZ"
+        mask_name= base_name + ".png"                             # "XYZ.png"
         msk_path = os.path.join(self.mask_folder, mask_name)
 
         image = Image.open(img_path).convert("RGB")
         mask  = Image.open(msk_path).convert("L")  # single‐channel
 
-        img_t = TF.to_tensor(image)           # (3, H, W)
-        msk_t = torch.from_numpy(np.array(mask)).long()  # (H, W) ints
+        img_t = TF.to_tensor(image)                               # (3, H, W)
+        msk_t = torch.from_numpy(np.array(mask)).long()            # (H, W) ints
 
         if self.transform:
             img_t, msk_t = self.transform(img_t, msk_t)
-
         return img_t, msk_t, im_name
 
 
@@ -226,20 +245,25 @@ def get_loaders_active(
             self.img_folder  = img_dir
             self.mask_folder = mask_dir
             self.transform   = transform
-            self.images      = [f for f in os.listdir(img_dir) if os.path.isfile(os.path.join(img_dir, f))]
+            self.images      = [
+                f for f in os.listdir(img_dir)
+                if os.path.isfile(os.path.join(img_dir, f)) and f.lower().endswith(".bmp")
+            ]
             self.images.sort()
 
         def __len__(self):
             return len(self.images)
 
         def __getitem__(self, idx):
-            im_name = self.images[idx]
+            im_name  = self.images[idx]                              # e.g. "XYZ.BMP"
             img_path = os.path.join(self.img_folder, im_name)
-            mask_name= im_name.replace(".jpg", "_mask.png")
+            base_name= os.path.splitext(im_name)[0]                   # "XYZ"
+            mask_name= base_name + ".png"                             # "XYZ.png"
             msk_path = os.path.join(self.mask_folder, mask_name)
 
             image = Image.open(img_path).convert("RGB")
             mask  = Image.open(msk_path).convert("L")
+
             img_t = TF.to_tensor(image)
             msk_t = torch.from_numpy(np.array(mask)).long()
 
@@ -252,20 +276,23 @@ def get_loaders_active(
             super().__init__()
             self.img_folder = img_dir
             self.transform  = transform
-            self.images     = [f for f in os.listdir(img_dir) if os.path.isfile(os.path.join(img_dir, f))]
+            self.images     = [
+                f for f in os.listdir(img_dir)
+                if os.path.isfile(os.path.join(img_dir, f)) and f.lower().endswith(".bmp")
+            ]
             self.images.sort()
 
         def __len__(self):
             return len(self.images)
 
         def __getitem__(self, idx):
-            im_name = self.images[idx]
+            im_name = self.images[idx]                              # e.g. "XYZ.BMP"
             img_path = os.path.join(self.img_folder, im_name)
             image = Image.open(img_path).convert("RGB")
             img_t  = TF.to_tensor(image)
             if self.transform:
                 img_t = self.transform(img_t)
-            return img_t, im_name  # note: no mask
+            return img_t, im_name  # no mask
 
     labeled_ds     = LabeledDataset(labeled_img_dir, labeled_mask_dir, transform_labeled)
     unlabeled_ds   = UnlabeledDataset(unlabeled_img_dir, transform_unlabeled)
