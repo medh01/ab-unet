@@ -52,7 +52,7 @@ def create_score_dict(
     # Loop over each (img_tensor, filename) in the unlabeled subset
     for img, fname in unlabeled_loader:
         # img: shape (1, C, H, W)
-        # fname: a single‐element tuple, e.g. ("IMG_1234.png",)
+        # fname: a single‐element tuple, e.g. ("IMG_1234.BMP",)
         T_probs = []
 
         if acquisition_type.lower() in ["entropy", "kl", "js"]:
@@ -92,7 +92,7 @@ def create_score_dict(
             # BALD: uses a specialized helper that runs T passes internally
             score = score_bald(
                 model=model,
-                img=img,
+                image=img,
                 T=mc_runs,
                 device=device,
                 num_classes=num_classes
@@ -203,12 +203,13 @@ def active_learning_loop(
             with torch.no_grad():
                 _ = model(imgs_t)
 
+            # CALL check_accuracy_batch with positional arguments (no keywords)
             batch_acc, batch_dice = check_accuracy_batch(
-                inputs      = imgs_t,
-                targets     = masks_t,
-                model       = model,
-                batch_size  = imgs_t.shape[0],
-                device      = device
+                imgs_t,
+                masks_t,
+                model,
+                imgs_t.shape[0],
+                device
             )
             total_acc  += batch_acc
             total_dice += batch_dice
