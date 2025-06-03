@@ -52,7 +52,7 @@ def create_score_dict(
     # Loop over each (img_tensor, filename) in the unlabeled subset
     for img, fname in unlabeled_loader:
         # img: shape (1, C, H, W)
-        # fname: a single‐element tuple, e.g. ("IMG_1234.BMP",)
+        # fname: either a single‐element tuple, e.g. ("IMG_1234.BMP",), or a plain string "IMG_1234.BMP"
         T_probs = []
 
         if acquisition_type.lower() in ["entropy", "kl", "js"]:
@@ -98,8 +98,13 @@ def create_score_dict(
                 num_classes=num_classes
             )
 
-        # fname is a length‐1 tuple, so we use fname[0] as the key:
-        scores[fname[0]] = score
+        # fname might be a one‐element tuple or a plain string. Handle both:
+        if isinstance(fname, (list, tuple)):
+            the_name = fname[0]
+        else:
+            the_name = fname
+
+        scores[the_name] = score
 
     # Sort by descending score and return as an “ordered” dict:
     sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -203,7 +208,7 @@ def active_learning_loop(
             with torch.no_grad():
                 _ = model(imgs_t)
 
-            # CALL check_accuracy_batch with positional arguments (no keywords)
+            # CALL check_accuracy_batch with positional arguments
             batch_acc, batch_dice = check_accuracy_batch(
                 imgs_t,
                 masks_t,
