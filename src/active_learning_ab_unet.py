@@ -134,13 +134,13 @@ def active_learning_loop(
          BASE_DIR/Unlabeled_pool/{unlabeled_images/, unlabeled_masks/}
          BASE_DIR/Test/{test_images/, test_masks/}
 
-    2) Then repeat `num_iterations` times:
+    2) Then repeat num_iterations times:
        a) Build DataLoaders: labeled_loader, unlabeled_loader, test_loader
-       b) Train a fresh AB‐UNet on labeled_loader for `num_epochs`
+       b) Train a fresh AB‐UNet on labeled_loader for num_epochs
        c) Evaluate on test_loader and print test accuracy + Dice
-       d) From Unlabeled_pool, pick a random subset of size `sample_size`.
-          Use `create_score_dict` to compute acquisition scores on that subset.
-       e) Move the top‐`sample_size` images from Unlabeled_pool → Labeled_pool
+       d) From Unlabeled_pool, pick a random subset of size sample_size.
+          Use create_score_dict to compute acquisition scores on that subset.
+       e) Move the top‐sample_size images from Unlabeled_pool → Labeled_pool
     """
     # 1) Ensure the three‐way split exists
     labeled_dir = "Labeled_pool"
@@ -226,7 +226,7 @@ def active_learning_loop(
         else:
             print("   [Warning] Test set is empty; skipping evaluation.")
 
-        # 2d) From the Unlabeled pool, pick a random subset of size `sample_size` to score
+        # 2d) From the Unlabeled pool, pick a random subset of size sample_size to score
         all_unlabeled_images = [
             f for f in os.listdir(UNLABELED_IMG_DIR)
             if os.path.isfile(os.path.join(UNLABELED_IMG_DIR, f))
@@ -261,7 +261,7 @@ def active_learning_loop(
             num_classes      = 4
         )
 
-        # 2e) Move the top‐scoring `sample_size` images (and masks) over
+        # 2e) Move the top‐scoring sample_size images (and masks) over
         print(f"  Querying the top {sample_size} images to label according to '{acquisition_type}' scores.")
         move_images_with_dict(
             base_dir      = BASE_DIR,
