@@ -1,4 +1,4 @@
-# run_al_experiments.py
+# experiments.py
 
 import os
 import random
@@ -8,21 +8,23 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
+from PIL import Image
+import torchvision.transforms.functional as TF
+import matplotlib.pyplot as plt
 
-# We assume these imports work relative to `src/`
-from active_learning_ab_unet import create_score_dict, active_learning_loop  # we'll modify the loop below
-from data_utils import (
+# Adjust this path if your data folder is elsewhere
+DATA_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../data"))
+
+from active_learning_ab_unet import create_score_dict
+from data_utils          import (
     labeled_unlabeled_test_split,
     move_images_with_dict,
     get_loaders_active
 )
-from train import train_fn, check_accuracy_batch
-from bayesian_unet import BayesianUNet
+from train               import train_fn, check_accuracy_batch
+from bayesian_unet       import BayesianUNet
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 1) First, figure out N = total number of raw images in data/Images
-# ────────────────────────────────────────────────────────────────────────────────
-DATA_ROOT = "/content/ab-unet/data"  # ← adjust to wherever your `data/` folder is
+# 1) Count total number of raw .BMP images in data/Images
 raw_imgs = [
     f for f in os.listdir(os.path.join(DATA_ROOT, "Images"))
     if os.path.isfile(os.path.join(DATA_ROOT, "Images", f)) and f.lower().endswith(".bmp")
@@ -30,90 +32,63 @@ raw_imgs = [
 N = len(raw_imgs)
 print(f"Total raw images (N) = {N}")
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 2) We will run ACTIVE LEARNING for each acquisition function in turn.
-#    At each iteration, we record:
-#      (number_of_labeled_images, test_dice).
-#    As soon as %_labeled crosses 10%, 20%, 50%, and eventually 100%,
-#    we pick the first test_dice that we obtain at (or just above) each threshold.
-# ────────────────────────────────────────────────────────────────────────────────
+# 2) Active‐learning will be run for each of these acquisition functions:
+acq_list   = ["random", "entropy", "bald", "js", "kl"]
+thresholds = [0.10, 0.20, 0.50, 1.00]
 
-# Which acquisition functions to compare
-acq_list = ["random", "entropy", "bald", "js", "kl"]
-
-# The percent thresholds at which we “snapshot” the test Dice
-thresholds = [0.10, 0.20, 0.50, 1.00]  # 10%, 20%, 50%, 100%
-
-# This dictionary will hold our final table data:
-#    table_data[percent][acq_fn] = test_Dice
+# Prepare a data structure to hold {threshold → {acq_fn → test_dice}}
 table_data = {p: {} for p in thresholds}
 
-
-# ────────────────────────────────────────────────────────────────────────────────
-# 3) A helper function that runs AL for *ONE* acquisition function
-# ────────────────────────────────────────────────────────────────────────────────
-def run_single_al(acq_type: str,
-                  label_split_ratio=0.05,
-                  test_split_ratio=0.30,
-                  sample_size=10,
-                  mc_runs=5,
-                  num_epochs=5,
-                  batch_size=4,
-                  lr=1e-3,
-                  device="cuda"):
+def run_single_al(
+        acq_type: str,
+        label_split_ratio=0.05,
+        test_split_ratio=0.30,
+        sample_size=10,
+        mc_runs=5,
+        num_epochs=5,
+        batch_size=4,
+        lr=1e-3,
+        device="cuda"
+    ):
     """
-    Runs active learning until 100% of images are in the labeled pool.
-    Returns a dict:  {
-        percent_labeled_ever_seen: test_dice_at_that_iteration,
-        ...
-    }
-    We'll only pick out the first time we cross each threshold.
+    Executes one full active‐learning run for a given acquisition type.
+    Returns a dict mapping each threshold (0.10, 0.20, 0.50, 1.00) to the
+    test‐Dice when at least that fraction of images have been labeled.
     """
 
-    # 3.1) Step 1: do the initial 3‐way split (Labeled/Unlabeled/Test)
-    labeled_dir   = "Labeled_pool"
-    unlabeled_dir = "Unlabeled_pool"
-    test_dir      = "Test"
-
-    # Delete existing splits if they exist, to start fresh:
-    for sub in [labeled_dir, unlabeled_dir, test_dir]:
-        full_path = os.path.join(DATA_ROOT, sub)
-        if os.path.isdir(full_path):
-            # Remove it completely (CAUTION: this deletes any previously moved files)
+    # 1) Clear any existing Labeled_pool, Unlabeled_pool, Test folders
+    for subdir in ["Labeled_pool", "Unlabeled_pool", "Test"]:
+        fullpath = os.path.join(DATA_ROOT, subdir)
+        if os.path.isdir(fullpath):
             import shutil
-            shutil.rmtree(full_path)
+            shutil.rmtree(fullpath)
 
-    # Now re‐create a fresh split
+    # 2) Create a fresh three‐way split
     labeled_unlabeled_test_split(
-        base_dir=DATA_ROOT,
-        labeled_dir=labeled_dir,
-        unlabeled_dir=unlabeled_dir,
-        test_dir=test_dir,
-        label_split_ratio=label_split_ratio,
-        test_split_ratio=test_split_ratio,
-        shuffle=True
+        base_dir          = DATA_ROOT,
+        labeled_dir       = "Labeled_pool",
+        unlabeled_dir     = "Unlabeled_pool",
+        test_dir          = "Test",
+        label_split_ratio = label_split_ratio,
+        test_split_ratio  = test_split_ratio,
+        shuffle           = True
     )
 
-    # Compute how many images started in the labeled pool:
-    labeled_images_root = os.path.join(DATA_ROOT, labeled_dir, "labeled_images")
-    num_labeled = len(os.listdir(labeled_images_root))
-    # We'll keep track of which threshold‐percentages we have already filled
     filled = {p: False for p in thresholds}
-    result_for_this_acq = {}
+    results_for_acq = {}
 
     iteration = 0
-
     while True:
         iteration += 1
-        print(f"\n--- AL iteration {iteration}  (algorithm = {acq_type}) ---")
+        print(f"\n--- AL iteration {iteration}  (acquisition = '{acq_type}') ---")
 
-        # 3.2) Build DataLoaders
-        LAB_IMG_DIR = os.path.join(DATA_ROOT, labeled_dir,   "labeled_images")
-        LAB_MSK_DIR = os.path.join(DATA_ROOT, labeled_dir,   "labeled_masks")
-        UNL_IMG_DIR = os.path.join(DATA_ROOT, unlabeled_dir, "unlabeled_images")
-        UNL_MSK_DIR = os.path.join(DATA_ROOT, unlabeled_dir, "unlabeled_masks")
-        TEST_IMG_DIR= os.path.join(DATA_ROOT, test_dir,      "test_images")
-        TEST_MSK_DIR= os.path.join(DATA_ROOT, test_dir,      "test_masks")
+        # 3) Build DataLoaders for current pools
+        LAB_IMG_DIR  = os.path.join(DATA_ROOT, "Labeled_pool",   "labeled_images")
+        LAB_MSK_DIR  = os.path.join(DATA_ROOT, "Labeled_pool",   "labeled_masks")
+        UNL_IMG_DIR  = os.path.join(DATA_ROOT, "Unlabeled_pool", "unlabeled_images")
+        UNL_MSK_DIR  = os.path.join(DATA_ROOT, "Unlabeled_pool", "unlabeled_masks")
+        TEST_IMG_DIR = os.path.join(DATA_ROOT, "Test",           "test_images")
+        TEST_MSK_DIR = os.path.join(DATA_ROOT, "Test",           "test_masks")
 
         labeled_loader, unlabeled_loader, test_loader = get_loaders_active(
             labeled_img_dir     = LAB_IMG_DIR,
@@ -128,8 +103,10 @@ def run_single_al(acq_type: str,
             num_workers         = 2
         )
 
-        # 3.3) Train a fresh Bayes‐UNet on *only* the current labeled set
-        model     = BayesianUNet(in_channels=3, out_channels=4, features=[64,128,256,512], dropout_prob=0.1).to(device)
+        # 4) Train a fresh BayesianUNet on the labeled pool
+        model     = BayesianUNet(in_channels=3, out_channels=4,
+                                 features=[64,128,256,512], dropout_prob=0.1
+                                ).to(device)
         optimizer = optim.Adam(model.parameters(), lr=lr)
         loss_fn   = nn.CrossEntropyLoss()
 
@@ -138,39 +115,42 @@ def run_single_al(acq_type: str,
             train_fn(labeled_loader, model, optimizer, loss_fn, None)
             print(f"   → Epoch {ep+1}/{num_epochs} done.")
 
-        # 3.4) Evaluate on the *test* set, compute average test Dice
+        # 5) Evaluate on the test set and compute average test Dice
         model.eval()
-        total_dice = 0.0
-        count_batches = 0
+        total_dice   = 0.0
+        batch_count  = 0
         with torch.no_grad():
-            for (imgs_t, masks_t, _) in test_loader:
+            for imgs_t, masks_t, _ in test_loader:
                 imgs_t  = imgs_t.to(device)
                 masks_t = masks_t.to(device)
-                preds_t = model(imgs_t)
-                batch_acc, batch_dice = check_accuracy_batch(imgs_t, masks_t, model, imgs_t.shape[0], device)
-                total_dice += batch_dice.item()
-                count_batches += 1
-        avg_test_dice = (total_dice / count_batches) if (count_batches>0) else 0.0
+                _ = model(imgs_t)
+                _, batch_dice = check_accuracy_batch(
+                    imgs_t, masks_t, model, imgs_t.shape[0], device
+                )
+                total_dice  += batch_dice.item()
+                batch_count += 1
+
+        avg_test_dice = (total_dice / batch_count) if (batch_count > 0) else 0.0
         print(f"  → Test Dice = {avg_test_dice:.4f}")
 
-        # 3.5) Check how many are labeled now, as a fraction of N
-        num_labeled = len(os.listdir(LAB_IMG_DIR))
-        frac_labeled = num_labeled / float(N)
-        print(f"  → {num_labeled}/{N} labeled  (= {frac_labeled*100:.1f} %)")
+        # 6) Compute fraction labeled so far
+        num_labeled   = len(os.listdir(LAB_IMG_DIR))
+        frac_labeled  = num_labeled / float(N)
+        print(f"  → {num_labeled}/{N} labeled  (={frac_labeled*100:.1f} %)")
 
-        # 3.6) If we just crossed any threshold (10%,20%,50%,100%), record it
+        # 7) Record Dice for any new threshold passed
         for p in thresholds:
-            if ( (frac_labeled >= p) and (not filled[p]) ):
+            if frac_labeled >= p and not filled[p]:
                 filled[p] = True
-                result_for_this_acq[p] = avg_test_dice
-                print(f"    ** recorded at {p*100:.0f}% → Dice = {avg_test_dice:.4f} **")
+                results_for_acq[p] = avg_test_dice
+                print(f"    ** Recorded at {int(p*100)}% → Dice = {avg_test_dice:.4f} **")
 
-        # 3.7) If the labeled pool is now 100% of N, break
+        # 8) If all images are labeled, stop
         if num_labeled >= N:
+            print("  → Labeled pool is 100% of N; stopping AL loop.\n")
             break
 
-        # 3.8) Otherwise, pick a *random subset* of size `sample_size` from the Unlabeled pool,
-        #      score them, and move the top‐`sample_size` → labeled.
+        # 9) Otherwise, sample `sample_size` from unlabeled to score & move
         all_unlabeled = [
             f for f in os.listdir(UNL_IMG_DIR)
             if os.path.isfile(os.path.join(UNL_IMG_DIR, f))
@@ -178,17 +158,19 @@ def run_single_al(acq_type: str,
         random.shuffle(all_unlabeled)
         subset_to_score = all_unlabeled[:sample_size]
 
-        # Build a tiny DataLoader that yields (tensor, filename) for those images
+        # Build a tiny loader for that subset
         class SubsetUnlabeledLoader:
             def __init__(self, img_dir, filenames):
                 self.img_dir = img_dir
                 self.files   = filenames
+
             def __iter__(self):
                 for fn in self.files:
-                    full = os.path.join(self.img_dir, fn)
-                    img  = Image.open(full).convert("RGB")
-                    t    = TF.to_tensor(img).unsqueeze(0)  # (1,3,H,W)
-                    yield t, fn
+                    full   = os.path.join(self.img_dir, fn)
+                    img    = Image.open(full).convert("RGB")
+                    tensor = TF.to_tensor(img).unsqueeze(0)  # (1,3,H,W)
+                    yield tensor, fn
+
             def __len__(self):
                 return len(self.files)
 
@@ -202,76 +184,63 @@ def run_single_al(acq_type: str,
             num_classes      = 4
         )
 
-        # Move the top‐`sample_size` scored images into the labeled pool
         move_images_with_dict(
             base_dir      = DATA_ROOT,
-            labeled_dir   = labeled_dir,
-            unlabeled_dir = unlabeled_dir,
+            labeled_dir   = "Labeled_pool",
+            unlabeled_dir = "Unlabeled_pool",
             score_dict    = score_dict,
             num_to_move   = sample_size
         )
 
-    # done entire loop; return the dict of percent→Dice
-    return result_for_this_acq
+    return results_for_acq
 
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 4) Now run for each acquisition function, collect results
-# ────────────────────────────────────────────────────────────────────────────────
+# 10) Execute active‐learning runs for each acquisition function
 for acq in acq_list:
     print(f"\n================ Running AL with acquisition = '{acq}' ================")
-    results = run_single_al(
-        acq_type=acq,
-        label_split_ratio=0.05,
-        test_split_ratio=0.30,
-        sample_size= int(0.05 * N),  # for example, 5% of N per iteration
-        mc_runs=5,
-        num_epochs=5,
-        batch_size=4,
-        lr=1e-3,
-        device="cuda" if torch.cuda.is_available() else "cpu"
+    results_dict = run_single_al(
+        acq_type        = acq,
+        label_split_ratio = 0.05,
+        test_split_ratio  = 0.30,
+        sample_size       = int(0.05 * N),  # e.g. 5% of N each iteration
+        mc_runs           = 5,
+        num_epochs        = 5,
+        batch_size        = 4,
+        lr                = 1e-3,
+        device            = "cuda" if torch.cuda.is_available() else "cpu"
     )
-
-    # `results` is something like {0.10:0.739, 0.20:0.773, 0.50:0.784, 1.00:0.786}
-    # Fill our table_data[percent][acq] = dice
     for p in thresholds:
-        table_data[p][acq] = results.get(p, np.nan)
+        table_data[p][acq] = results_dict.get(p, np.nan)
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 5) Build a pandas DataFrame and print it (this is the “table”)
-# ────────────────────────────────────────────────────────────────────────────────
+
+# 11) Build a pandas DataFrame and print neatly
 df = pd.DataFrame.from_dict(table_data, orient="index")
-df = df[acq_list]  # reorder columns to [“random”,“entropy”,“bald”,“js”,“kl”]
+df = df[acq_list]  # order columns exactly as ["random","entropy","bald","js","kl"]
 df.index = ["10 %", "20 %", "50 %", "100 %"]
-print("\n—— Final Active‐Learning Dice Scores ——")
+
+print("\n—— Final Active‐Learning Dice Scores ———")
 print(df.to_markdown(tablefmt="github", floatfmt=".3f"))
-# You can also save to CSV:
 df.to_csv("al_dice_table.csv")
 
-# If you want to inspect in a notebook:
-# display(df)
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 6) Finally, plot Dice vs. % for each acquisition function
-# ────────────────────────────────────────────────────────────────────────────────
-import matplotlib.pyplot as plt
-
-plt.figure(figsize=(6,4))
+# 12) Plot Dice vs. % labeled for each acquisition function
+plt.figure(figsize=(7,4))
 x = [10, 20, 50, 100]
-
 for acq in acq_list:
-    y = [ df.loc["10 %", acq],
-          df.loc["20 %", acq],
-          df.loc["50 %", acq],
-          df.loc["100 %", acq] ]
+    y = [
+        df.loc["10 %",  acq],
+        df.loc["20 %",  acq],
+        df.loc["50 %",  acq],
+        df.loc["100 %", acq]
+    ]
     plt.plot(x, y, marker="o", label=acq)
 
 plt.title("Active‐Learning Test Dice vs. % of Dataset")
 plt.xlabel("% of dataset labeled")
 plt.ylabel("Test Dice")
 plt.xticks(x)
-plt.ylim(0.7, 0.82)   # adjust as needed
-plt.grid(True, linestyle="--", alpha=0.4)
+plt.ylim(0.70, 0.82)
+plt.grid(linestyle="--", alpha=0.4)
 plt.legend(title="Acquisition fn.", loc="lower right")
 plt.tight_layout()
 plt.savefig("al_dice_plot.png", dpi=200)
