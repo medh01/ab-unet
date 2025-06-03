@@ -2,7 +2,6 @@
 
 import os
 import random
-import shutil
 import numpy as np
 import pandas as pd
 import torch
@@ -13,18 +12,7 @@ from PIL import Image
 import torchvision.transforms.functional as TF
 import matplotlib.pyplot as plt
 
-# Make sure these paths match your project layout:
-# ab-unet/
-#   data/
-#     Images/
-#     masks/
-#   src/
-#     active_learning_ab_unet.py
-#     bayesian_unet.py
-#     bayesian_unet_parts.py
-#     data_utils.py
-#     train.py
-#     experiments.py   ← (this file)
+# Adjust this path if your data folder is elsewhere
 DATA_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../data"))
 
 from active_learning_ab_unet import create_score_dict
@@ -51,7 +39,6 @@ thresholds = [0.10, 0.20, 0.50, 1.00]
 # Prepare a data structure to hold {threshold → {acq_fn → test_dice}}
 table_data = {p: {} for p in thresholds}
 
-
 def run_single_al(
         acq_type: str,
         label_split_ratio=0.05,
@@ -73,6 +60,7 @@ def run_single_al(
     for subdir in ["Labeled_pool", "Unlabeled_pool", "Test"]:
         fullpath = os.path.join(DATA_ROOT, subdir)
         if os.path.isdir(fullpath):
+            import shutil
             shutil.rmtree(fullpath)
 
     # 2) Create a fresh three‐way split
@@ -129,8 +117,8 @@ def run_single_al(
 
         # 5) Evaluate on the test set and compute average test Dice
         model.eval()
-        total_dice  = 0.0
-        batch_count = 0
+        total_dice   = 0.0
+        batch_count  = 0
         with torch.no_grad():
             for imgs_t, masks_t, _ in test_loader:
                 imgs_t  = imgs_t.to(device)
@@ -146,8 +134,8 @@ def run_single_al(
         print(f"  → Test Dice = {avg_test_dice:.4f}")
 
         # 6) Compute fraction labeled so far
-        num_labeled  = len(os.listdir(LAB_IMG_DIR))
-        frac_labeled = num_labeled / float(N)
+        num_labeled   = len(os.listdir(LAB_IMG_DIR))
+        frac_labeled  = num_labeled / float(N)
         print(f"  → {num_labeled}/{N} labeled  (={frac_labeled*100:.1f} %)")
 
         # 7) Record Dice for any new threshold passed
@@ -211,10 +199,10 @@ def run_single_al(
 for acq in acq_list:
     print(f"\n================ Running AL with acquisition = '{acq}' ================")
     results_dict = run_single_al(
-        acq_type          = acq,
+        acq_type        = acq,
         label_split_ratio = 0.05,
         test_split_ratio  = 0.30,
-        sample_size       = int(0.05 * N),  # e.g. 5% of N at each iteration
+        sample_size       = int(0.05 * N),  # e.g. 5% of N each iteration
         mc_runs           = 5,
         num_epochs        = 5,
         batch_size        = 4,
@@ -227,7 +215,7 @@ for acq in acq_list:
 
 # 11) Build a pandas DataFrame and print neatly
 df = pd.DataFrame.from_dict(table_data, orient="index")
-df = df[acq_list]  # enforce column order: ["random","entropy","bald","js","kl"]
+df = df[acq_list]  # order columns exactly as ["random","entropy","bald","js","kl"]
 df.index = ["10 %", "20 %", "50 %", "100 %"]
 
 print("\n—— Final Active‐Learning Dice Scores ———")

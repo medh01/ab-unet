@@ -69,16 +69,14 @@ class BayesianUNet(nn.Module):
 
 
 if __name__ == "__main__":
-    # Quick sanity check
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = BayesianUNet(
         in_channels=3,
-        out_channels=4,            # e.g. 4 classes
+        out_channels=4,
         features=[64, 128, 256, 512],
         dropout_prob=0.1
     ).to(device)
 
-    x = torch.randn(2, 3, 256, 256).to(device)  # batch of 2 RGB images, 256×256
+    x = torch.randn(2, 3, 256, 256).to(device)
     preds = model(x)
     print("Output shape:", preds.shape)
-    # Should be (2, 4, 256, 256): 4 class probabilities per pixel (softmax applied)
