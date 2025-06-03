@@ -147,35 +147,44 @@ def move_images_with_dict(
 ):
     """
     Move the top‐`num_to_move` images (by descending score) from
-    unlabeled → labeled.  `score_dict` is an OrderedDict {filename:score}.
+    Unlabeled_pool → Labeled_pool, based on `score_dict`.
+    This version strips leading/trailing whitespace from each filename to avoid mismatch.
     """
     moved = 0
     for im, score in score_dict.items():
         if moved >= num_to_move:
             break
 
-        # Move the .BMP image
-        src_im = os.path.join(base_dir, unlabeled_dir, "unlabeled_images", im)
+        # Strip any stray whitespace from the filename
+        im_clean = im.strip()
+
+        # Path to the image we expect to move
+        src_im = os.path.join(base_dir, unlabeled_dir, "unlabeled_images", im_clean)
         if not os.path.exists(src_im):
+            print(f"[WARN] Could not find image (skipping): {src_im}")
             continue
-        dst_im = os.path.join(base_dir, labeled_dir,   "labeled_images",   im)
+
+        # Copy the image
+        dst_im = os.path.join(base_dir, labeled_dir, "labeled_images", im_clean)
         shutil.copy(src_im, dst_im)
         os.remove(src_im)
+        print(f"[MOVE] IMAGE {im_clean}")
 
-        # Move the corresponding .png mask
-        base_name = os.path.splitext(im)[0]
+        # Now move its mask
+        base_name = os.path.splitext(im_clean)[0]
         mask_name = base_name + ".png"
         src_msk   = os.path.join(base_dir, unlabeled_dir, "unlabeled_masks", mask_name)
         dst_msk   = os.path.join(base_dir, labeled_dir,   "labeled_masks",   mask_name)
         if os.path.exists(src_msk):
             shutil.copy(src_msk, dst_msk)
             os.remove(src_msk)
+            print(f"[MOVE]  MASK {mask_name}")
         else:
-            print(f"Warning: mask {src_msk} not found; skipping.")
+            print(f"[WARN] Mask not found, skipping mask: {src_msk}")
 
         moved += 1
 
-    print(f"Moved {moved} images from {unlabeled_dir} → {labeled_dir}.")
+    print(f"Final count: Moved {moved} images from {unlabeled_dir} → {labeled_dir}.")
 
 ################################################################################
 # 2.3) DATASET & DATALOADER FOR ACTIVE LEARNING
