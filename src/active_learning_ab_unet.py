@@ -284,9 +284,11 @@ if __name__ == "__main__":
     #   • In Kaggle:    "/kaggle/working/ab-unet/data"
     #   • Locally (from ab-unet/src): "../data"
     # ──────────────────────────────────────────────────────────────────────────
-    BASE_DIR = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "../data")
-    )
+    # BASE_DIR = os.path.abspath(
+    #     os.path.join(os.path.dirname(__file__), "../data")
+    # )
+
+    BASE_DIR = "/kaggle/input/dataset/data"
 
     LABEL_SPLIT_RATIO   = 0.05
     TEST_SPLIT_RATIO    = 0.30
